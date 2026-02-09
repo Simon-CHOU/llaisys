@@ -1,4 +1,5 @@
-from ctypes import POINTER, c_uint8, c_void_p, c_size_t, c_ssize_t, c_int
+import ctypes
+from ctypes import POINTER, c_uint8, c_void_p, c_size_t, c_ssize_t, c_int, c_char_p
 from .llaisys_types import llaisysDataType_t, llaisysDeviceType_t
 
 # Handle type
@@ -58,6 +59,31 @@ def load_tensor(lib):
     # Function: tensorLoad
     lib.tensorLoad.argtypes = [llaisysTensor_t, c_void_p]
     lib.tensorLoad.restype = None
+
+    try:
+        lib.tensorLoadFromFile.argtypes = [llaisysTensor_t, c_char_p, c_size_t, c_size_t]
+        lib.tensorLoadFromFile.restype = None
+    except AttributeError:
+        def tensorLoadFromFile(tensor, filename, offset, bytes_):
+            if isinstance(filename, c_char_p):
+                filename = filename.value
+            if isinstance(filename, (bytes, bytearray)):
+                path = filename.decode("utf-8")
+            else:
+                path = str(filename)
+
+            def as_int(v):
+                return int(v.value) if hasattr(v, "value") else int(v)
+
+            offset_val = as_int(offset)
+            bytes_val = as_int(bytes_)
+            with open(path, "rb") as f:
+                f.seek(offset_val)
+                data = f.read(bytes_val)
+            buf = ctypes.create_string_buffer(data)
+            lib.tensorLoad(tensor, ctypes.cast(buf, c_void_p))
+
+        lib.tensorLoadFromFile = tensorLoadFromFile
 
     # Function: tensorView(llaisysTensor_t tensor, size_t *shape);
     lib.tensorView.argtypes = [llaisysTensor_t, POINTER(c_size_t), c_size_t]

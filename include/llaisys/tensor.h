@@ -49,6 +49,12 @@ __C {
         llaisysTensor_t tensor,
         const void *data);
 
+    __export void tensorLoadFromFile(
+        llaisysTensor_t tensor,
+        const char * filename,
+        size_t offset,
+        size_t bytes);
+
     __export llaisysTensor_t tensorView(
         llaisysTensor_t tensor,
         size_t * shape,

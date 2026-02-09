@@ -266,19 +266,85 @@ void Tensor::load(const void *src_) {
     api->memcpy_sync(this->data(), src_, bytes, kind);
 }
 
+namespace {
+void copy_recursive(std::byte *&dst, const std::byte *src, const std::vector<size_t> &shape, const std::vector<ptrdiff_t> &strides, size_t dim, size_t elem_size) {
+    if (shape.empty()) { // Scalar
+        std::memcpy(dst, src, elem_size);
+        dst += elem_size;
+        return;
+    }
+    
+    size_t count = shape[dim];
+    ptrdiff_t stride = strides[dim];
+    size_t stride_bytes = stride * elem_size;
+
+    if (dim == shape.size() - 1) {
+        for (size_t i = 0; i < count; ++i) {
+            std::memcpy(dst, src + i * stride_bytes, elem_size);
+            dst += elem_size;
+        }
+    } else {
+        for (size_t i = 0; i < count; ++i) {
+            copy_recursive(dst, src + i * stride_bytes, shape, strides, dim + 1, elem_size);
+        }
+    }
+}
+} // namespace
+
 tensor_t Tensor::contiguous() const {
-    TO_BE_IMPLEMENTED();
-    return std::shared_ptr<Tensor>(new Tensor(_meta, _storage));
+    if (isContiguous()) {
+        return std::shared_ptr<Tensor>(new Tensor(_meta, _storage, _offset));
+    }
+    
+    auto new_tensor = Tensor::create(_meta.shape, _meta.dtype, this->deviceType(), this->deviceId());
+    
+    if (this->deviceType() == LLAISYS_DEVICE_CPU) {
+        std::byte* dst_ptr = new_tensor->data();
+        if (_meta.shape.empty()) {
+             std::memcpy(dst_ptr, this->data(), elementSize());
+        } else {
+             copy_recursive(dst_ptr, this->data(), _meta.shape, _meta.strides, 0, elementSize());
+        }
+    } else {
+        TO_BE_IMPLEMENTED();
+    }
+    
+    return new_tensor;
 }
 
 tensor_t Tensor::reshape(const std::vector<size_t> &shape) const {
-    TO_BE_IMPLEMENTED();
-    return std::shared_ptr<Tensor>(new Tensor(_meta, _storage));
+    if (this->isContiguous()) {
+        return this->view(shape);
+    }
+    return this->contiguous()->view(shape);
 }
 
 tensor_t Tensor::to(llaisysDeviceType_t device_type, int device) const {
-    TO_BE_IMPLEMENTED();
-    return std::shared_ptr<Tensor>(new Tensor(_meta, _storage));
+    if (this->deviceType() == device_type && this->deviceId() == device) {
+        return std::shared_ptr<Tensor>(new Tensor(_meta, _storage, _offset));
+    }
+    
+    tensor_t src_tensor;
+    if (isContiguous()) {
+        src_tensor = std::shared_ptr<Tensor>(new Tensor(_meta, _storage, _offset));
+    } else {
+        src_tensor = this->contiguous();
+    }
+    
+    auto dst_tensor = Tensor::create(_meta.shape, _meta.dtype, device_type, device);
+    
+    core::context().setDevice(device_type, device);
+    auto api = core::context().runtime().api();
+    
+    llaisysMemcpyKind_t kind;
+    if (src_tensor->deviceType() == LLAISYS_DEVICE_CPU && device_type == LLAISYS_DEVICE_CPU) kind = LLAISYS_MEMCPY_H2H;
+    else if (src_tensor->deviceType() == LLAISYS_DEVICE_CPU && device_type != LLAISYS_DEVICE_CPU) kind = LLAISYS_MEMCPY_H2D;
+    else if (src_tensor->deviceType() != LLAISYS_DEVICE_CPU && device_type == LLAISYS_DEVICE_CPU) kind = LLAISYS_MEMCPY_D2H;
+    else kind = LLAISYS_MEMCPY_D2D;
+
+    api->memcpy_sync(dst_tensor->data(), src_tensor->data(), dst_tensor->numel() * dst_tensor->elementSize(), kind);
+    
+    return dst_tensor;
 }
 
 } // namespace llaisys

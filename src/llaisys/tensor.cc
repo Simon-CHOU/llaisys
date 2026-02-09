@@ -1,5 +1,6 @@
+#define _CRT_SECURE_NO_WARNINGS
 #include "llaisys_tensor.hpp"
-
+#include <cstdio>
 #include <vector>
 
 __C {
@@ -69,6 +70,37 @@ __C {
         llaisysTensor_t tensor,
         const void *data) {
         tensor->tensor->load(data);
+    }
+    
+    void tensorLoadFromFile(
+        llaisysTensor_t tensor,
+        const char * filename,
+        size_t offset,
+        size_t bytes) {
+        
+        if (tensor->tensor->deviceType() != LLAISYS_DEVICE_CPU) {
+            fprintf(stderr, "tensorLoadFromFile only supports CPU tensors for now\n");
+            return;
+        }
+
+        FILE *f = fopen(filename, "rb");
+        if (!f) {
+            fprintf(stderr, "Failed to open file: %s\n", filename);
+            return;
+        }
+        
+#ifdef _WIN32
+        _fseeki64(f, (__int64)offset, SEEK_SET);
+#else
+        fseeko(f, (off_t)offset, SEEK_SET);
+#endif
+        
+        size_t read = fread(tensor->tensor->data(), 1, bytes, f);
+        if (read != bytes) {
+             fprintf(stderr, "Failed to read expected bytes. Read %zu, expected %zu\n", read, bytes);
+        }
+        
+        fclose(f);
     }
 
     llaisysTensor_t tensorView(
