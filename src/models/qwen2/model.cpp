@@ -151,9 +151,19 @@ tensor_t Qwen2::forward(tensor_t input_ids) {
     size_t kv_dim = _meta.nkvh * head_dim;
     size_t inter_dim = _meta.di;
     
+    auto pos_ids = Tensor::create({seq_len}, LLAISYS_DTYPE_I64, _device_type, _device_id);
+    if (_device_type == LLAISYS_DEVICE_CPU) {
+        int64_t *pos_ptr = reinterpret_cast<int64_t*>(pos_ids->data());
+        for (size_t p = 0; p < seq_len; ++p) {
+            pos_ptr[p] = static_cast<int64_t>(_kv_pos + p);
+        }
+    } else {
+         std::vector<int64_t> pos_vec(seq_len);
+         for (size_t p = 0; p < seq_len; ++p) pos_vec[p] = _kv_pos + p;
+         pos_ids->load(pos_vec.data());
+    }
+
     for (size_t i = 0; i < _meta.nlayer; ++i) {
-        auto residual = x;
-        
         // 1. RMS Norm
         auto x_norm = Tensor::create(x->shape(), x->dtype(), x->deviceType(), x->deviceId());
         ops::rms_norm(x_norm, x, _weights.attn_norm_w[i]->tensor, _meta.epsilon);
@@ -161,28 +171,12 @@ tensor_t Qwen2::forward(tensor_t input_ids) {
         // 2. Attention
         auto q = Tensor::create({seq_len, q_dim}, x->dtype(), _device_type, _device_id);
         auto k = Tensor::create({seq_len, kv_dim}, x->dtype(), _device_type, _device_id);
-        auto v = Tensor::create({seq_len, kv_dim}, x->dtype(), _device_type, _device_id);
         
         ops::linear(q, x_norm, _weights.attn_q_w[i]->tensor, _weights.attn_q_b[i]->tensor);
         ops::linear(k, x_norm, _weights.attn_k_w[i]->tensor, _weights.attn_k_b[i]->tensor);
-        ops::linear(v, x_norm, _weights.attn_v_w[i]->tensor, _weights.attn_v_b[i]->tensor);
         
         auto q_3d = q->reshape({seq_len, _meta.nh, head_dim});
         auto k_3d = k->reshape({seq_len, _meta.nkvh, head_dim});
-        auto v_3d = v->reshape({seq_len, _meta.nkvh, head_dim});
-        
-        // RoPE
-        auto pos_ids = Tensor::create({seq_len}, LLAISYS_DTYPE_I64, _device_type, _device_id);
-        if (_device_type == LLAISYS_DEVICE_CPU) {
-            int64_t *pos_ptr = reinterpret_cast<int64_t*>(pos_ids->data());
-            for (size_t p = 0; p < seq_len; ++p) {
-                pos_ptr[p] = static_cast<int64_t>(_kv_pos + p);
-            }
-        } else {
-             std::vector<int64_t> pos_vec(seq_len);
-             for (size_t p = 0; p < seq_len; ++p) pos_vec[p] = _kv_pos + p;
-             pos_ids->load(pos_vec.data());
-        }
         
         auto q_rope = Tensor::create(q_3d->shape(), q_3d->dtype(), _device_type, _device_id);
         ops::rope(q_rope, q_3d, pos_ids, _meta.theta);
@@ -195,26 +189,10 @@ tensor_t Qwen2::forward(tensor_t input_ids) {
         auto v_slot = v_cache->slice(1, _kv_pos, _kv_pos + seq_len);
         
         auto k_slot_3d = k_slot->reshape({seq_len, _meta.nkvh, head_dim});
-        auto v_slot_3d = v_slot->reshape({seq_len, _meta.nkvh, head_dim});
         
         ops::rope(k_slot_3d, k_3d, pos_ids, _meta.theta);
         
-        // Copy V to cache. Since we computed V in linear (v), we need to copy to v_slot_3d.
-        // We can use a trick: use `add` with zero.
-        // Or better: pass `v_slot_3d` (reshaped to 2D) as output to `linear` above!
-        // But `linear` was already called.
-        // To be safe and efficient, we should use `linear` output as `v` temp, then copy.
-        // `ops::add` works for copy if we add 0.
-        // Or assume `v_slot_3d` is destination.
-        // Let's use `add(out, in, zero_tensor)`. Or just `add(out, in, in)` is 2*in.
-        // Wait, `add(c, a, b)` -> `c = a + b`.
-        // If we don't have copy, and `add` is available...
-        // We can create a zero tensor?
-        // Or maybe just `swiglu` or something? No.
-        // Actually, `linear` output could have been directly `v_slot` if we reshaped `v_slot` to 2D.
-        // Let's refactor to write directly to cache for V!
-        
-        auto v_slot_2d = v_slot_3d->reshape({seq_len, kv_dim});
+        auto v_slot_2d = v_slot->reshape({seq_len, kv_dim});
         ops::linear(v_slot_2d, x_norm, _weights.attn_v_w[i]->tensor, _weights.attn_v_b[i]->tensor);
         // Done for V.
         
@@ -236,7 +214,6 @@ tensor_t Qwen2::forward(tensor_t input_ids) {
         ops::add(x, x, proj_out);
         
         // 3. MLP
-        residual = x;
         auto x_mlp_norm = Tensor::create(x->shape(), x->dtype(), _device_type, _device_id);
         ops::rms_norm(x_mlp_norm, x, _weights.mlp_norm_w[i]->tensor, _meta.epsilon);
         
